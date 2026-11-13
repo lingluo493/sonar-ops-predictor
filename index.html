@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>声呐巡逻 · 潜艇位置预测器</title>
+<style>
+  :root{
+    --bg1:#f0f9ff; --bg2:#dbeefe;
+    --card:#ffffff; --line:#dbe6ef;
+    --ink:#0f172a; --sub:#64748b;
+    --accent:#0284c7; --good:#16a34a; --bad:#ef4444;
+    --miss:#94a3b8; --hitc:#ef4444; --sunkc:#1e3a5f;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{
+    font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    background:linear-gradient(160deg,var(--bg1),var(--bg2));
+    color:var(--ink); min-height:100vh; padding:18px;
+  }
+  header{max-width:1060px;margin:0 auto 14px;display:flex;flex-wrap:wrap;align-items:center;gap:12px;}
+  header h1{font-size:20px;font-weight:700;}
+  header h1 .b{color:var(--accent);}
+  header .spacer{flex:1;}
+  select,button{
+    font:inherit; padding:7px 12px; border-radius:10px; border:1px solid var(--line);
+    background:#fff; color:var(--ink); cursor:pointer;
+  }
+  button:hover,select:hover{border-color:var(--accent);}
+  button.primary{background:var(--accent);color:#fff;border-color:var(--accent);}
+  button.danger{background:#fff;color:var(--bad);border-color:#fecaca;}
+  button.ghost{background:#f8fafc;}
+  main{max-width:1060px;margin:0 auto;display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start;}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 2px 10px rgba(2,132,199,.07);padding:14px;}
+  #boardCard{flex:0 0 auto;}
+  #panel{flex:1 1 300px;min-width:300px;display:flex;flex-direction:column;gap:12px;}
+
+  #board{display:grid;gap:3px;user-select:none;}
+  .coord{display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--sub);font-weight:600;}
+  .cell{
+    position:relative;border-radius:8px;border:1px solid rgba(148,163,184,.35);
+    display:flex;align-items:center;justify-content:center;
+    font-size:11px;font-weight:700;color:#0f172a;cursor:pointer;
+    transition:transform .06s;
+  }
+  .cell:hover{transform:scale(1.06);z-index:2;}
+  .cell.miss{background:var(--miss);color:#fff;border-color:transparent;}
+  .cell.hit{background:var(--hitc);color:#fff;border-color:transparent;}
+  .cell.sunk{background:var(--sunkc);color:#fff;border-color:transparent;}
+  .cell.picked{outline:3px solid #7c3aed;outline-offset:1px;}
+  .cell.reco{outline:3px solid var(--good);outline-offset:1px;}
+  .cell.reco::after{content:"★";position:absolute;top:-2px;right:1px;font-size:11px;color:var(--good);}
+  .legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;font-size:12px;color:var(--sub);}
+  .legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-1px;}
+
+  h2{font-size:14px;margin-bottom:8px;}
+  h2 small{color:var(--sub);font-weight:400;}
+  .chips{display:flex;gap:8px;flex-wrap:wrap;}
+  .chip{background:#e0f2fe;border:1px solid #bae6fd;border-radius:999px;padding:4px 12px;font-size:13px;font-weight:600;color:#075985;}
+  .chip.zero{opacity:.35;text-decoration:line-through;}
+  .fleetrow{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:13px;}
+  .fleetrow button{padding:2px 10px;border-radius:8px;}
+  .statline{font-size:13px;color:var(--sub);line-height:1.7;}
+  #reco{font-size:15px;font-weight:700;color:var(--good);}
+  ol.top{margin:6px 0 0 20px;font-size:13px;line-height:1.8;}
+  .tips{font-size:12.5px;color:var(--sub);line-height:1.8;}
+  .tips b{color:var(--ink);}
+  #sunkBar{display:none;align-items:center;gap:10px;flex-wrap:wrap;background:#f5f3ff;border:1px solid #ddd6fe;border-radius:12px;padding:10px;}
+  #sunkBar.on{display:flex;}
+  .warn{background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;border-radius:10px;padding:8px 10px;font-size:12.5px;display:none;}
+  .warn.show{display:block;}
+  .custom{display:none;}
+  .custom.on{display:block;}
+  details{font-size:12.5px;color:var(--sub);}
+  details summary{cursor:pointer;font-weight:600;color:var(--ink);}
+  details p{margin:6px 0;}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🌊 声呐巡逻 · <span class="b">潜艇位置预测器</span></h1>
+  <div class="spacer"></div>
+  <select id="zoneSel" title="选择海域"></select>
+  <button id="undoBtn" class="ghost" title="撤销上一步 (Ctrl+Z)">↩ 撤销</button>
+  <button id="clearBtn" class="danger">清空</button>
+</header>
+
+<main>
+  <div class="card" id="boardCard">
+    <div id="board"></div>
+    <div class="legend">
+      <span><i style="background:linear-gradient(90deg,#e6f3fb,#f4633a)"></i>概率热力（越红越可能有潜艇）</span>
+      <span><i style="background:#94a3b8"></i>落空 ✕</span>
+      <span><i style="background:#ef4444"></i>命中 💥</span>
+      <span><i style="background:#1e3a5f"></i>已击沉 ⚓</span>
+      <span><i style="background:#fff;outline:2px solid #16a34a"></i>推荐目标 ★</span>
+    </div>
+    <div style="margin-top:8px;font-size:12px;color:#64748b">左键点击格子循环切换：<b>未知 → 落空 → 命中 → 未知</b></div>
+  </div>
+
+  <div id="panel">
+    <div class="card">
+      <h2>🎯 下一炸推荐 <small>（点击后自动更新）</small></h2>
+      <div id="reco">—</div>
+      <ol class="top" id="topList"></ol>
+      <div class="statline" id="calcStat" style="margin-top:8px"></div>
+      <div class="warn" id="warnBox"></div>
+    </div>
+
+    <div class="card">
+      <h2>🚢 剩余潜艇 <small id="fleetNote"></small></h2>
+      <div class="chips" id="fleetChips"></div>
+      <div class="custom" id="customBox" style="margin-top:10px">
+        <div class="fleetrow"><span>地图尺寸：</span>
+          <select id="customN"></select>
+        </div>
+        <div id="customFleet"></div>
+      </div>
+      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <button id="sunkBtn" class="primary">⚓ 标记击沉</button>
+        <label style="font-size:12.5px;color:var(--sub)"><input type="checkbox" id="strictChk" checked> 潜艇之间对角也算相邻（严格模式）</label>
+      </div>
+      <div id="sunkBar">
+        <span style="font-size:13px">已选 <b id="sunkCount">0</b> 个命中格</span>
+        <button id="sunkOk" class="primary">确认击沉</button>
+        <button id="sunkCancel" class="ghost">取消</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>💡 实战技巧</h2>
+      <div class="tips" id="tips"></div>
+      <details style="margin-top:8px">
+        <summary>📖 使用说明 & 深水炸弹经济学</summary>
+        <p>1. 在上方选择当前海域（每个海域潜艇编成固定，来自官方数据）。</p>
+        <p>2. 每扔一颗深水炸弹，就把结果标在图上：<b>落空 ✕ / 命中 💥</b>。程序会用蒙特卡洛模拟上万种合法布局，算出每格含潜艇的概率。</p>
+        <p>3. 确认一艘潜艇被击沉后，点「⚓ 标记击沉」，依次点击它的所有格子再确认——程序会把这艘潜艇从编成中移除，并把周围一圈标记为安全区（潜艇间至少隔 1 格）。</p>
+        <p>4. 炸弹来源：每天前 5 次进攻分基地/雇佣兵基地每次 3 发，之后每次 1 发（每日战斗上限 10 次）；看广告每天可领 2 发。</p>
+        <p>5. 集束炸弹（6 号海域解锁）必中至少 1 发，建议留给剩余潜艇少、格子大的残局。</p>
+        <p>6. 每击沉 1 艘 +10 声呐币，清空海域再 +50。声呐币活动结束清零，记得花掉！</p>
+      </details>
+    </div>
+  </div>
+</main>
+
+<script>
+"use strict";
+/* ================= 海域数据（官方编成） ================= */
+const ZONES = [
+  {name:"1号海域 (3×3)",  n:3,  fleet:{2:0,3:1,4:0,5:0}},
+  {name:"2号海域 (4×4)",  n:4,  fleet:{2:2,3:0,4:0,5:0}},
+  {name:"3号海域 (5×5)",  n:5,  fleet:{2:2,3:1,4:0,5:0}},
+  {name:"4号海域 (6×6)",  n:6,  fleet:{2:1,3:1,4:1,5:0}},
+  {name:"5号海域 (7×7)",  n:7,  fleet:{2:1,3:2,4:1,5:0}},
+  {name:"6号海域 (8×8)",  n:8,  fleet:{2:2,3:2,4:0,5:1}},
+  {name:"7号海域 (9×9)",  n:9,  fleet:{2:2,3:2,4:1,5:1}},
+  {name:"8号海域 (10×10)",n:10, fleet:{2:2,3:2,4:2,5:1}},
+  {name:"9号海域 (10×10)",n:10, fleet:{2:1,3:2,4:2,5:1}},
+  {name:"10号海域 (10×10)",n:10,fleet:{2:2,3:1,4:2,5:1}},
+  {name:"11号及以后 (10×10)",n:10,fleet:{2:2,3:1,4:1,5:1}},
+  {name:"自定义舰队",     n:10, fleet:{2:2,3:2,4:1,5:1}, custom:true},
+];
+const LETTERS = "ABCDEFGHIJ";
+
+/* ================= 全局状态 ================= */
+let zoneIdx = 0;
+let n = 10;
+let grid = [];            // 0未知 1落空 2命中 3击沉
+let sunkSizes = [];       // 已确认击沉的潜艇长度
+let undoStack = [];
+let probs = null;         // Float64Array
+let validSamples = 0;
+let recoIdx = -1;
+let customFleet = {2:2,3:2,4:1,5:1};
+let sunkMode = false;
+let picked = new Set();
+let computeTimer = null;
+
+/* ================= 预计算布置方案 ================= */
+const PL = {};   // PL[n][size] = [{cells:Int32Array, nb:Int32Array}]
+const NEI = {};  // NEI[n] = 数组，每格邻居索引
+
+function neighborList(n2, i, strict){
+  const r = (i/n2)|0, c = i%n2, out=[];
+  const dirs = strict ? [[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]]
+                      : [[-1,0],[0,-1],[0,1],[1,0]];
+  for(const [dr,dc] of dirs){
+    const rr=r+dr, cc=c+dc;
+    if(rr>=0&&rr<n2&&cc>=0&&cc<n2) out.push(rr*n2+cc);
+  }
+  return out;
+}
+function buildGeometry(n2, strict){
+  const key = n2 + (strict?"s":"l");
+  if(PL[key]) return key;
+  NEI[key] = [];
+  for(let i=0;i<n2*n2;i++) NEI[key].push(neighborList(n2,i,strict));
+  PL[key] = {};
+  for(let size=2;size<=5;size++){
+    const list=[];
+    const add=(cells)=>{
+      const arr = Int32Array.from(cells);
+      const nbSet = new Set();
+      for(const i of arr) for(const nb of NEI[key][i]) if(!arr.includes(nb)) nbSet.add(nb);
+      list.push({cells:arr, nb:Int32Array.from(nbSet)});
+    };
+    for(let r=0;r<n2;r++) for(let c=0;c+size<=n2;c++){
+      const cells=[]; for(let k=0;k<size;k++) cells.push(r*n2+c+k); add(cells);
+    }
+    for(let c=0;c<n2;c++) for(let r=0;r+size<=n2;r++){
+      const cells=[]; for(let k=0;k<size;k++) cells.push((r+k)*n2+c); add(cells);
+    }
+    PL[key][size]=list;
+  }
+  return key;
+}
+
+/* ================= 蒙特卡洛采样 ================= */
+function sampleBoards(n2, fleetArr, forbidden, hitIdx, samples, strict){
+  const key = buildGeometry(n2, strict);
+  const N2 = n2*n2;
+  const hitGrid = new Uint8Array(N2);
+  for(const i of hitIdx) hitGrid[i]=1;
+  const covered = new Uint8Array(N2);
+  const occupied = new Uint8Array(N2);
+  const counts = new Float64Array(N2);
+  let valid=0, tries=0;
+  const maxTries = samples*10;
+  const order = fleetArr.slice();
+
+  while(valid<samples && tries<maxTries){
+    tries++;
+    occupied.fill(0); covered.fill(0);
+    for(let i=order.length-1;i>0;i--){const j=(Math.random()*(i+1))|0; const t=order[i];order[i]=order[j];order[j]=t;}
+    let ok=true;
+    for(const size of order){
+      const list = PL[key][size];
+      const cand=[]; const w=[]; let tw=0;
+      for(const pl of list){
+        let good=true, cov=0;
+        const cells=pl.cells;
+        for(let k=0;k<cells.length;k++){
+          const i=cells[k];
+          if(forbidden[i]||occupied[i]){good=false;break;}
+          if(hitGrid[i]&&!covered[i])cov++;
+        }
+        if(good){
+          const nb=pl.nb;
+          for(let k=0;k<nb.length;k++){ if(occupied[nb[k]]){good=false;break;} }
+        }
+        if(good){ cand.push(pl); if(cov>0){w.push(15);}else{w.push(1);} tw += (cov>0?15:1); }
+      }
+      if(cand.length===0){ok=false;break;}
+      let x=Math.random()*tw, pick=cand[0];
+      for(let i2=0;i2<cand.length;i2++){ x-=w[i2]; if(x<=0){pick=cand[i2];break;} }
+      const pc=pick.cells;
+      for(let k=0;k<pc.length;k++){ const i=pc[k]; occupied[i]=1; if(hitGrid[i])covered[i]=1; }
+    }
+    if(!ok) continue;
+    let allCov=true;
+    for(const i of hitIdx){ if(!covered[i]){allCov=false;break;} }
+    if(!allCov) continue;
+    valid++;
+    for(let i=0;i<N2;i++) if(occupied[i]) counts[i]+=1;
+  }
+  return {counts, valid, tries};
+}
+
+/* ================= 概率计算入口 ================= */
+function currentFleet(){
+  const f = (ZONES[zoneIdx].custom ? customFleet : ZONES[zoneIdx].fleet);
+  const arr=[];
+  for(let s=2;s<=5;s++) for(let k=0;k<(f[s]||0);k++) arr.push(s);
+  // 移除已击沉的
+  for(const s of sunkSizes){
+    const i = arr.indexOf(s);
+    if(i>=0) arr.splice(i,1);
+  }
+  return arr;
+}
+function deriveInputs(){
+  const N2=n*n;
+  const strict = document.getElementById("strictChk").checked;
+  const forbidden = new Uint8Array(N2);
+  const hitIdx=[];
+  for(let i=0;i<N2;i++){
+    if(grid[i]===1) forbidden[i]=1;
+    else if(grid[i]===2) hitIdx.push(i);
+    else if(grid[i]===3){
+      forbidden[i]=1;
+      for(const nb of neighborList(n,i,strict)) forbidden[nb]=1;
+    }
+  }
+  return {forbidden, hitIdx, fleet:currentFleet(), strict};
+}
+function compute(){
+  const {forbidden, hitIdx, fleet, strict} = deriveInputs();
+  const warnBox = document.getElementById("warnBox");
+  warnBox.classList.remove("show");
+  const N2=n*n;
+  const unknownExists = grid.some(v=>v===0);
+
+  if(fleet.length===0){
+    probs = new Float64Array(N2);
+    validSamples = 1;
+    if(hitIdx.length>0){
+      warnBox.textContent="⚠️ 潜艇已全部标记击沉，但图上还有「命中」格——请检查是否漏标了击沉。";
+      warnBox.classList.add("show");
+    }
+  } else {
+    const totalSubs = fleet.reduce((a,b)=>a+b,0);
+    const samples = Math.max(4000, Math.min(12000, 12000 - n*200));
+    const r = sampleBoards(n, fleet, forbidden, hitIdx, samples, strict);
+    probs = r.counts; validSamples = r.valid;
+    if(r.valid < 300){
+      warnBox.textContent="⚠️ 找不到与当前标记一致的布局（模拟 "+r.tries+" 次仅 "+r.valid+" 次成功）。请检查标记：命中格数量是否超过剩余潜艇总长度？击沉标记是否正确？";
+      warnBox.classList.add("show");
+    }
+  }
+
+  // 推荐目标
+  recoIdx=-1; let best=-1;
+  for(let i=0;i<N2;i++){
+    if(grid[i]!==0) continue;
+    const p = validSamples>0 ? probs[i]/validSamples : 0;
+    if(p>best){best=p; recoIdx=i;}
+  }
+  renderBoard();
+  renderResults();
+}
+
+/* ================= 渲染 ================= */
+function cellSize(){ return n<=5?52 : n<=7?47 : n<=8?44 : 40; }
+function buildBoard(){
+  const board=document.getElementById("board");
+  board.innerHTML="";
+  const cs=cellSize();
+  board.style.gridTemplateColumns = (cs+"px").concat(" repeat("+n+","+cs+"px)");
+  const corner=document.createElement("div"); corner.className="coord"; board.appendChild(corner);
+  for(let c=0;c<n;c++){
+    const d=document.createElement("div"); d.className="coord"; d.textContent=LETTERS[c]; board.appendChild(d);
+  }
+  for(let r=0;r<n;r++){
+    const d=document.createElement("div"); d.className="coord"; d.textContent=r+1; board.appendChild(d);
+    for(let c=0;c<n;c++){
+      const cell=document.createElement("div");
+      cell.className="cell"; cell.style.width=cs+"px"; cell.style.height=cs+"px";
+      cell.dataset.i=r*n+c;
+      cell.title = LETTERS[c]+(r+1);
+      cell.addEventListener("click", ()=>onCellClick(r*n+c));
+      board.appendChild(cell);
+    }
+  }
+}
+function probColor(t){
+  // t: 0~1 相对最大概率
+  t=Math.max(0,Math.min(1,t));
+  const h = 205 - 195*t;       // 蓝 → 红
+  const s = 55 + 30*t;
+  const l = 91 - 28*t;
+  return `hsl(${h} ${s}% ${l}%)`;
+}
+function renderBoard(){
+  const cells=document.querySelectorAll("#board .cell");
+  let maxP=0;
+  if(probs && validSamples>0){
+    for(let i=0;i<n*n;i++) if(grid[i]===0) maxP=Math.max(maxP, probs[i]/validSamples);
+  }
+  cells.forEach(cell=>{
+    const i=+cell.dataset.i;
+    const st=grid[i];
+    cell.classList.remove("miss","hit","sunk","reco","picked");
+    cell.style.background="";
+    cell.style.color="";
+    if(st===1){cell.classList.add("miss");cell.textContent="✕";}
+    else if(st===2){cell.classList.add("hit");cell.textContent="💥";}
+    else if(st===3){cell.classList.add("sunk");cell.textContent="⚓";}
+    else{
+      if(probs && validSamples>0 && maxP>0){
+        const p=probs[i]/validSamples;
+        cell.style.background=probColor(maxP>0?p/maxP:0);
+        cell.textContent=Math.round(p*100)+"%";
+      } else { cell.textContent=""; }
+      if(i===recoIdx) cell.classList.add("reco");
+      if(picked.has(i)) cell.classList.add("picked");
+    }
+  });
+}
+function coordName(i){ return LETTERS[i%n] + (((i/n)|0)+1); }
+function renderResults(){
+  // 舰队
+  const f = (ZONES[zoneIdx].custom ? customFleet : ZONES[zoneIdx].fleet);
+  const remain = {2:0,3:0,4:0,5:0};
+  for(let s=2;s<=5;s++) remain[s]=f[s]||0;
+  for(const s of sunkSizes) remain[s]=Math.max(0,remain[s]-1);
+  const chips=document.getElementById("fleetChips");
+  chips.innerHTML="";
+  let anySub=false;
+  for(let s=5;s>=2;s--){
+    if(!(f[s]>0) && !ZONES[zoneIdx].custom && ZONES[zoneIdx].fleet[s]===0) continue;
+    const d=document.createElement("div");
+    d.className="chip"+(remain[s]===0?" zero":"");
+    d.textContent = s+"格潜艇 × "+remain[s];
+    chips.appendChild(d);
+    if(remain[s]>0) anySub=true;
+  }
+  document.getElementById("fleetNote").textContent = anySub ? "" : "🎉 本海域已清空！";
+
+  // 推荐 & Top5
+  const recoEl=document.getElementById("reco");
+  const list=document.getElementById("topList");
+  list.innerHTML="";
+  if(recoIdx>=0 && probs && validSamples>0){
+    const p=probs[recoIdx]/validSamples;
+    recoEl.textContent = "建议轰炸 "+coordName(recoIdx)+"（概率 "+Math.round(p*100)+"%）";
+    const arr=[];
+    for(let i=0;i<n*n;i++) if(grid[i]===0) arr.push([i,probs[i]/validSamples]);
+    arr.sort((a,b)=>b[1]-a[1]);
+    for(let k=0;k<Math.min(5,arr.length);k++){
+      const li=document.createElement("li");
+      li.textContent = coordName(arr[k][0])+" — "+Math.round(arr[k][1]*100)+"%";
+      list.appendChild(li);
+    }
+  } else {
+    recoEl.textContent = fleetEmpty() ? "🎉 本海域潜艇已全部击沉！" : "—";
+  }
+  const stat=document.getElementById("calcStat");
+  stat.textContent = validSamples>0 ? "基于 "+validSamples+" 种合法布局模拟" : "";
+  renderTips();
+}
+function fleetEmpty(){ return currentFleet().length===0 && sunkSizes.length>0; }
+function renderTips(){
+  const hitCount = grid.filter(v=>v===2).length;
+  const tips=document.getElementById("tips");
+  let html="";
+  if(hitCount>0){
+    html += "<b>🎯 有命中未击沉：</b>优先轰炸命中格<b>上下左右</b>的格子，先确定艇身方向，再沿方向延伸。程序的热力图已自动把概率集中到这些区域。";
+  } else if(currentFleet().length>0){
+    const minLen = Math.min(...currentFleet());
+    html += "<b>🔍 开局扫描：</b>所有潜艇长度 ≥ "+minLen+" 格，可按<b>每隔 "+minLen+" 格</b>的跳格模式轰炸（先打同行同列的间隔格），首中效率最高。";
+  }
+  html += "<br><b>⚓ 击沉后：</b>潜艇周围一圈（含对角）必然无艇，程序已自动排除这些格。";
+  html += "<br><b>💣 省弹秘诀：</b>概率每 1% 的差距在残局都很宝贵；当多个格概率并列时，优先选能同时覆盖多艘候选艇方向的格。";
+  tips.innerHTML=html;
+}
+
+/* ================= 交互 ================= */
+function pushUndo(){
+  undoStack.push(JSON.stringify({grid, sunkSizes}));
+  if(undoStack.length>150) undoStack.shift();
+}
+function onCellClick(i){
+  if(sunkMode){
+    if(grid[i]===2){
+      if(picked.has(i)) picked.delete(i); else picked.add(i);
+      renderBoard();
+      document.getElementById("sunkCount").textContent=picked.size;
+    }
+    return;
+  }
+  pushUndo();
+  grid[i] = (grid[i]===0?1 : grid[i]===1?2 : 0);
+  scheduleCompute();
+}
+function scheduleCompute(){
+  renderBoard();
+  clearTimeout(computeTimer);
+  computeTimer=setTimeout(compute, 200);
+}
+function undo(){
+  if(!undoStack.length) return;
+  const s=JSON.parse(undoStack.pop());
+  grid=s.grid; sunkSizes=s.sunkSizes;
+  exitSunkMode();
+  scheduleCompute();
+}
+function resetBoard(keepZone){
+  grid = new Array(n*n).fill(0);
+  sunkSizes=[];
+  undoStack=[];
+  exitSunkMode();
+  probs=null; validSamples=0; recoIdx=-1;
+  buildBoard();
+  compute();
+}
+function exitSunkMode(){
+  sunkMode=false; picked.clear();
+  document.getElementById("sunkBar").classList.remove("on");
+  document.getElementById("sunkBtn").textContent="⚓ 标记击沉";
+}
+
+/* 击沉标记流程 */
+document.getElementById("sunkBtn").addEventListener("click", ()=>{
+  if(sunkMode){ exitSunkMode(); renderBoard(); return; }
+  const hits = grid.filter(v=>v===2).length;
+  if(hits===0){ alert("请先标记至少一个「命中💥」格，再标记击沉。"); return; }
+  sunkMode=true; picked.clear();
+  document.getElementById("sunkBar").classList.add("on");
+  document.getElementById("sunkBtn").textContent="✕ 退出击沉模式";
+  document.getElementById("sunkCount").textContent=0;
+  renderBoard();
+});
+document.getElementById("sunkOk").addEventListener("click", ()=>{
+  const idx=[...picked].sort((a,b)=>a-b);
+  if(idx.length<2){ alert("请至少选中 2 个相邻的命中格（一艘潜艇至少 2 格）。"); return; }
+  // 校验连成一条直线
+  const rows=idx.map(i=>(i/n)|0), cols=idx.map(i=>i%n);
+  const sameRow=rows.every(r=>r===rows[0]);
+  const sameCol=cols.every(c=>c===cols[0]);
+  let contiguous=false;
+  if(sameRow){
+    const cs=idx.map(i=>i%n).sort((a,b)=>a-b);
+    contiguous = cs.every((c,k)=>c===cs[0]+k);
+  } else if(sameCol){
+    const rs=idx.map(i=>(i/n)|0).sort((a,b)=>a-b);
+    contiguous = rs.every((r,k)=>r===rs[0]+k);
+  }
+  if(!contiguous){ alert("选中的格子必须连成一条直线（横向或纵向）。请检查所选命中格。"); return; }
+  const size=idx.length;
+  const f = (ZONES[zoneIdx].custom ? customFleet : ZONES[zoneIdx].fleet);
+  const used = sunkSizes.filter(s=>s===size).length;
+  if(!(f[size] > used)){ alert(size+" 格潜艇在该海域编成中只有 "+(f[size]||0)+" 艘，且可能已全部击沉。请核对。"); return; }
+  pushUndo();
+  for(const i of idx) grid[i]=3;
+  sunkSizes.push(size);
+  exitSunkMode();
+  scheduleCompute();
+});
+document.getElementById("sunkCancel").addEventListener("click", ()=>{ exitSunkMode(); renderBoard(); });
+
+/* 撤销 / 清空 */
+document.getElementById("undoBtn").addEventListener("click", undo);
+document.addEventListener("keydown", e=>{
+  if((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==="z"){ e.preventDefault(); undo(); }
+});
+document.getElementById("clearBtn").addEventListener("click", ()=>{
+  if(grid.some(v=>v!==0) && !confirm("确定清空当前海域的所有标记？")) return;
+  resetBoard();
+});
+document.getElementById("strictChk").addEventListener("change", compute);
+
+/* 海域切换 */
+const zoneSel=document.getElementById("zoneSel");
+ZONES.forEach((z,i)=>{
+  const o=document.createElement("option"); o.value=i; o.textContent=z.name; zoneSel.appendChild(o);
+});
+zoneSel.addEventListener("change", ()=>{
+  zoneIdx=+zoneSel.value;
+  const z=ZONES[zoneIdx];
+  document.getElementById("customBox").classList.toggle("on", !!z.custom);
+  if(z.custom){ n=+document.getElementById("customN").value; }
+  else { n=z.n; }
+  resetBoard();
+});
+
+/* 自定义编辑器 */
+const customN=document.getElementById("customN");
+for(let s=3;s<=10;s++){ const o=document.createElement("option"); o.value=s; o.textContent=s+" × "+s; customN.appendChild(o); }
+customN.value=10;
+customN.addEventListener("change", ()=>{
+  if(!ZONES[zoneIdx].custom) return;
+  n=+customN.value; resetBoard();
+});
+const customFleetBox=document.getElementById("customFleet");
+function buildCustomFleet(){
+  customFleetBox.innerHTML="";
+  for(let s=5;s>=2;s--){
+    const row=document.createElement("div"); row.className="fleetrow";
+    row.innerHTML = `<span style="width:70px">${s} 格潜艇：</span>
+      <button data-s="${s}" data-d="-1">−</button>
+      <b style="width:24px;text-align:center" id="cf${s}">${customFleet[s]}</b>
+      <button data-s="${s}" data-d="1">＋</button>`;
+    customFleetBox.appendChild(row);
+  }
+  customFleetBox.querySelectorAll("button").forEach(b=>b.addEventListener("click",()=>{
+    const s=+b.dataset.s, d=+b.dataset.d;
+    customFleet[s]=Math.max(0, Math.min(6, customFleet[s]+d));
+    document.getElementById("cf"+s).textContent=customFleet[s];
+    resetBoard();
+  }));
+}
+buildCustomFleet();
+
+/* ================= 启动 ================= */
+buildBoard();
+grid = new Array(n*n).fill(0);
+compute();
+</script>
+</body>
+</html>
