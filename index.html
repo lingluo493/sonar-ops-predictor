@@ -97,6 +97,7 @@
       <span><i style="background:#fff;outline:2px solid #16a34a"></i>推荐目标 ★</span>
     </div>
     <div style="margin-top:8px;font-size:12px;color:#64748b">左键点击格子循环切换：<b>未知 → 落空 → 命中 → 未知</b></div>
+    <div id="saveNote" style="margin-top:4px;font-size:12px;color:#16a34a;min-height:16px"></div>
   </div>
 
   <div id="panel">
@@ -176,6 +177,53 @@ let customFleet = {2:2,3:2,4:1,5:1};
 let sunkMode = false;
 let picked = new Set();
 let computeTimer = null;
+
+/* ================= 本地存档（localStorage，每个海域独立保存） ================= */
+const SAVE_KEY = "sonarPredictorSave_v1";
+function loadSave(){
+  try{ return JSON.parse(localStorage.getItem(SAVE_KEY) || "{}"); }catch(e){ return {}; }
+}
+function saveAll(){
+  try{
+    const s = loadSave();
+    s.zoneIdx = zoneIdx;
+    s.customFleet = customFleet;
+    s.customN = +document.getElementById("customN").value;
+    s.strict = document.getElementById("strictChk").checked;
+    s.zones = s.zones || {};
+    s.zones["z"+zoneIdx] = { n: n, grid: grid.slice(), sunkSizes: sunkSizes.slice() };
+    s.savedAt = Date.now();
+    localStorage.setItem(SAVE_KEY, JSON.stringify(s));
+    const el = document.getElementById("saveNote");
+    if(el){
+      const d = new Date();
+      const hh = String(d.getHours()).padStart(2,"0"), mm = String(d.getMinutes()).padStart(2,"0");
+      el.textContent = "💾 已自动保存 " + hh + ":" + mm + "（刷新/关闭后自动恢复）";
+    }
+  }catch(e){}
+}
+function clearZoneSave(){
+  try{
+    const s = loadSave();
+    if(s.zones) delete s.zones["z"+zoneIdx];
+    localStorage.setItem(SAVE_KEY, JSON.stringify(s));
+    const el = document.getElementById("saveNote");
+    if(el) el.textContent = "";
+  }catch(e){}
+}
+function restoreZoneState(){
+  const s = loadSave();
+  if(typeof s.strict === "boolean") document.getElementById("strictChk").checked = s.strict;
+  const z = (s.zones || {})["z"+zoneIdx];
+  if(z && z.n === n && Array.isArray(z.grid) && z.grid.length === n*n){
+    grid = z.grid.map(v => (v>=0 && v<=3) ? v : 0);
+    sunkSizes = Array.isArray(z.sunkSizes) ? z.sunkSizes.slice() : [];
+    return true;
+  }
+  grid = new Array(n*n).fill(0);
+  sunkSizes = [];
+  return false;
+}
 
 /* ================= 预计算布置方案 ================= */
 const PL = {};   // PL[n][size] = [{cells:Int32Array, nb:Int32Array}]
@@ -328,6 +376,7 @@ function compute(){
   }
   renderBoard();
   renderResults();
+  saveAll();
 }
 
 /* ================= 渲染 ================= */
@@ -535,7 +584,8 @@ document.addEventListener("keydown", e=>{
   if((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==="z"){ e.preventDefault(); undo(); }
 });
 document.getElementById("clearBtn").addEventListener("click", ()=>{
-  if(grid.some(v=>v!==0) && !confirm("确定清空当前海域的所有标记？")) return;
+  if(grid.some(v=>v!==0) && !confirm("确定清空当前海域的所有标记？（该海域的存档也会一并清除）")) return;
+  clearZoneSave();
   resetBoard();
 });
 document.getElementById("strictChk").addEventListener("change", compute);
@@ -551,7 +601,9 @@ zoneSel.addEventListener("change", ()=>{
   document.getElementById("customBox").classList.toggle("on", !!z.custom);
   if(z.custom){ n=+document.getElementById("customN").value; }
   else { n=z.n; }
-  resetBoard();
+  buildBoard();
+  restoreZoneState();   // 切换海域时恢复该海域自己的进度
+  compute();
 });
 
 /* 自定义编辑器 */
@@ -560,7 +612,11 @@ for(let s=3;s<=10;s++){ const o=document.createElement("option"); o.value=s; o.t
 customN.value=10;
 customN.addEventListener("change", ()=>{
   if(!ZONES[zoneIdx].custom) return;
-  n=+customN.value; resetBoard();
+  n=+customN.value;
+  clearZoneSave();   // 尺寸变了，旧标记作废
+  grid=new Array(n*n).fill(0); sunkSizes=[]; undoStack=[];
+  exitSunkMode(); probs=null; validSamples=0; recoIdx=-1;
+  buildBoard(); compute();
 });
 const customFleetBox=document.getElementById("customFleet");
 function buildCustomFleet(){
@@ -577,14 +633,30 @@ function buildCustomFleet(){
     const s=+b.dataset.s, d=+b.dataset.d;
     customFleet[s]=Math.max(0, Math.min(6, customFleet[s]+d));
     document.getElementById("cf"+s).textContent=customFleet[s];
-    resetBoard();
+    compute();   // 标记保留，仅重新计算
   }));
 }
 buildCustomFleet();
 
-/* ================= 启动 ================= */
+/* ================= 启动（自动恢复上次进度） ================= */
+(function initFromSave(){
+  const s=loadSave();
+  if(Number.isInteger(s.zoneIdx) && s.zoneIdx>=0 && s.zoneIdx<ZONES.length) zoneIdx=s.zoneIdx;
+  if(s.customFleet && typeof s.customFleet==="object") customFleet=s.customFleet;
+  zoneSel.value=zoneIdx;
+  const z=ZONES[zoneIdx];
+  document.getElementById("customBox").classList.toggle("on", !!z.custom);
+  if(z.custom){
+    const cn=(Number.isInteger(s.customN)&&s.customN>=3&&s.customN<=10)?s.customN:10;
+    document.getElementById("customN").value=cn;
+    n=cn;
+    buildCustomFleet();   // 刷新自定义舰队显示
+  } else {
+    n=z.n;
+  }
+})();
 buildBoard();
-grid = new Array(n*n).fill(0);
+restoreZoneState();
 compute();
 </script>
 </body>
