@@ -82,6 +82,10 @@
   <h1>🌊 声呐巡逻 · <span class="b">潜艇位置预测器</span></h1>
   <div class="spacer"></div>
   <select id="zoneSel" title="选择海域"></select>
+  <select id="slotSel" title="切换存档（每个存档独立命名保存）"></select>
+  <button id="newSlotBtn" class="ghost" title="新建存档，建议命名：账号-海域，如「大号-8号海域」">＋ 存档</button>
+  <button id="renameSlotBtn" class="ghost" title="重命名当前存档">✏️</button>
+  <button id="delSlotBtn" class="ghost" title="删除当前存档">🗑</button>
   <button id="undoBtn" class="ghost" title="撤销上一步 (Ctrl+Z)">↩ 撤销</button>
   <button id="clearBtn" class="danger">清空</button>
 </header>
@@ -134,7 +138,7 @@
       <div class="tips" id="tips"></div>
       <details style="margin-top:8px">
         <summary>📖 使用说明 & 深水炸弹经济学</summary>
-        <p>1. 在上方选择当前海域（每个海域潜艇编成固定，来自官方数据）。</p>
+        <p>1. 在上方选择当前海域（每个海域潜艇编成固定，来自官方数据）。<b>多个账号请点「＋ 存档」为每个账号建一个命名存档</b>（如「大号-8号海域」「小号-8号海域」），互不覆盖；可用下拉框随时切换，✏️ 重命名、🗑 删除。</p>
         <p>2. 每扔一颗深水炸弹，就把结果标在图上：<b>落空 ✕ / 命中 💥</b>。程序会用蒙特卡洛模拟上万种合法布局，算出每格含潜艇的概率。</p>
         <p>3. 确认一艘潜艇被击沉后，点「⚓ 标记击沉」，依次点击它的所有格子再确认——程序会把这艘潜艇从编成中移除，并把周围一圈标记为安全区（潜艇间至少隔 1 格）。</p>
         <p>4. 炸弹来源：每天前 5 次进攻分基地/雇佣兵基地每次 3 发，之后每次 1 发（每日战斗上限 10 次）；看广告每天可领 2 发。</p>
@@ -178,52 +182,180 @@ let sunkMode = false;
 let picked = new Set();
 let computeTimer = null;
 
-/* ================= 本地存档（localStorage，每个海域独立保存） ================= */
-const SAVE_KEY = "sonarPredictorSave_v1";
+/* ================= 本地存档（命名存档槽，可多账号并存） ================= */
+const SAVE_KEY = "sonarPredictorSave_v2";
+const OLD_SAVE_KEY = "sonarPredictorSave_v1";
+let activeSlotId = null;
+
 function loadSave(){
-  try{ return JSON.parse(localStorage.getItem(SAVE_KEY) || "{}"); }catch(e){ return {}; }
+  try{ return JSON.parse(localStorage.getItem(SAVE_KEY) || "null"); }catch(e){ return null; }
 }
-function saveAll(){
-  try{
-    const s = loadSave();
-    s.zoneIdx = zoneIdx;
-    s.customFleet = customFleet;
-    s.customN = +document.getElementById("customN").value;
-    s.strict = document.getElementById("strictChk").checked;
-    s.zones = s.zones || {};
-    s.zones["z"+zoneIdx] = { n: n, grid: grid.slice(), sunkSizes: sunkSizes.slice() };
-    s.savedAt = Date.now();
-    localStorage.setItem(SAVE_KEY, JSON.stringify(s));
-    const el = document.getElementById("saveNote");
-    if(el){
-      const d = new Date();
-      const hh = String(d.getHours()).padStart(2,"0"), mm = String(d.getMinutes()).padStart(2,"0");
-      el.textContent = "💾 已自动保存 " + hh + ":" + mm + "（刷新/关闭后自动恢复）";
-    }
-  }catch(e){}
+function db(){
+  let s = loadSave();
+  if(!s || typeof s!=="object" || !s.slots || typeof s.slots!=="object") s = {slots:{}, activeId:null};
+  return s;
 }
-function clearZoneSave(){
-  try{
-    const s = loadSave();
-    if(s.zones) delete s.zones["z"+zoneIdx];
-    localStorage.setItem(SAVE_KEY, JSON.stringify(s));
-    const el = document.getElementById("saveNote");
-    if(el) el.textContent = "";
-  }catch(e){}
+function persist(d){ try{ localStorage.setItem(SAVE_KEY, JSON.stringify(d)); }catch(e){} }
+function saveNoteMsg(t){ const el=document.getElementById("saveNote"); if(el) el.textContent=t; }
+function genId(){ return "s"+Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
+function slotName(id){ const d=db(); const sl=d.slots[id]; return sl?sl.name:""; }
+
+function saveActive(){
+  if(activeSlotId==null) return;
+  const d=db(); const sl=d.slots[activeSlotId]; if(!sl) return;
+  sl.zoneIdx=zoneIdx; sl.n=n;
+  sl.grid=grid.slice(); sl.sunkSizes=sunkSizes.slice();
+  sl.customFleet=JSON.parse(JSON.stringify(customFleet));
+  sl.customN=+document.getElementById("customN").value;
+  sl.strict=document.getElementById("strictChk").checked;
+  sl.savedAt=Date.now();
+  d.activeId=activeSlotId; persist(d);
+  const t=new Date(); const hh=String(t.getHours()).padStart(2,"0"), mm=String(t.getMinutes()).padStart(2,"0");
+  saveNoteMsg("💾 已自动保存到「"+sl.name+"」 "+hh+":"+mm+"（刷新/关闭后自动恢复）");
 }
-function restoreZoneState(){
-  const s = loadSave();
-  if(typeof s.strict === "boolean") document.getElementById("strictChk").checked = s.strict;
-  const z = (s.zones || {})["z"+zoneIdx];
-  if(z && z.n === n && Array.isArray(z.grid) && z.grid.length === n*n){
-    grid = z.grid.map(v => (v>=0 && v<=3) ? v : 0);
-    sunkSizes = Array.isArray(z.sunkSizes) ? z.sunkSizes.slice() : [];
-    return true;
+
+function applySlot(sl){
+  zoneIdx = Math.min(Math.max(0, sl.zoneIdx|0), ZONES.length-1);
+  document.getElementById("zoneSel").value = zoneIdx;
+  if(sl.customFleet && typeof sl.customFleet==="object") customFleet = Object.assign({2:0,3:0,4:0,5:0}, sl.customFleet);
+  document.getElementById("customBox").classList.toggle("on", !!ZONES[zoneIdx].custom);
+  const cn = (Number.isInteger(sl.customN)&&sl.customN>=3&&sl.customN<=10) ? sl.customN : 10;
+  document.getElementById("customN").value = cn;
+  if(typeof sl.strict==="boolean") document.getElementById("strictChk").checked = sl.strict;
+  n = ZONES[zoneIdx].custom ? cn : ZONES[zoneIdx].n;
+  if(sl.n===n && Array.isArray(sl.grid) && sl.grid.length===n*n){
+    grid = sl.grid.map(v=>(v>=0&&v<=3)?v:0);
+    sunkSizes = Array.isArray(sl.sunkSizes) ? sl.sunkSizes.slice() : [];
+  } else {
+    grid = new Array(n*n).fill(0); sunkSizes = [];
   }
-  grid = new Array(n*n).fill(0);
-  sunkSizes = [];
-  return false;
+  undoStack=[]; exitSunkMode(); probs=null; validSamples=0; recoIdx=-1;
+  buildCustomFleet();
+  buildBoard();
 }
+
+function createSlot(name, data){
+  const d=db();
+  const id=genId();
+  d.slots[id] = Object.assign({
+    name: name || ("存档"+(Object.keys(d.slots).length+1)),
+    zoneIdx: 0, customFleet:{2:2,3:2,4:1,5:1}, customN:10, strict:true
+  }, data||{});
+  d.activeId=id; persist(d);
+  activeSlotId=id;
+  applySlot(d.slots[id]);
+  renderSlots();
+  return id;
+}
+
+function renderSlots(){
+  const sel=document.getElementById("slotSel");
+  sel.innerHTML="";
+  const d=db();
+  const ids=Object.keys(d.slots).sort((a,b)=>(d.slots[b].savedAt||0)-(d.slots[a].savedAt||0));
+  for(const id of ids){
+    const sl=d.slots[id];
+    const zn = ZONES[sl.zoneIdx] ? ZONES[sl.zoneIdx].name : "?";
+    const o=document.createElement("option"); o.value=id;
+    o.textContent = sl.name + "｜" + zn;
+    sel.appendChild(o);
+  }
+  if(activeSlotId!=null) sel.value=activeSlotId;
+}
+
+function switchSlot(id){
+  if(id===activeSlotId) return;
+  const d=db();
+  if(!d.slots[id]) return;
+  if(activeSlotId!=null && d.slots[activeSlotId]) saveActive();
+  activeSlotId=id; d.activeId=id; persist(d);
+  applySlot(d.slots[id]);
+  compute();
+  saveNoteMsg("📂 已切换到「"+d.slots[id].name+"」");
+}
+
+function newSlotFlow(){
+  const d=db();
+  const defName = "存档"+(Object.keys(d.slots).length+1);
+  const name = prompt("给新存档起个名字（建议：账号-海域，如「大号-8号海域」）：", defName);
+  if(name===null) return;
+  createSlot(name.trim()||defName, {
+    zoneIdx, n, grid:new Array(n*n).fill(0), sunkSizes:[],
+    customFleet:JSON.parse(JSON.stringify(customFleet)),
+    customN:+document.getElementById("customN").value,
+    strict:document.getElementById("strictChk").checked,
+    savedAt:Date.now()
+  });
+  compute();
+  saveNoteMsg("🆕 新存档「"+slotName(activeSlotId)+"」已创建");
+}
+
+function renameSlotFlow(){
+  if(activeSlotId==null) return;
+  const d=db(); const sl=d.slots[activeSlotId];
+  const name=prompt("重命名存档：", sl.name);
+  if(name===null) return;
+  sl.name=name.trim()||sl.name; sl.savedAt=Date.now(); persist(d);
+  renderSlots();
+  saveNoteMsg("✏️ 已重命名为「"+sl.name+"」");
+}
+
+function deleteSlotFlow(){
+  if(activeSlotId==null) return;
+  const d=db(); const sl=d.slots[activeSlotId];
+  if(!confirm("确定删除存档「"+sl.name+"」？该存档的所有标记将丢失。")) return;
+  delete d.slots[activeSlotId];
+  const rest=Object.keys(d.slots).sort((a,b)=>(d.slots[b].savedAt||0)-(d.slots[a].savedAt||0));
+  if(rest.length){
+    activeSlotId=rest[0]; d.activeId=activeSlotId; persist(d);
+    applySlot(d.slots[activeSlotId]); compute();
+  } else {
+    persist(d); activeSlotId=null;
+    createSlot("默认存档"); compute();
+  }
+  renderSlots();
+}
+
+/* 旧版（v1 按海域保存）自动迁移为命名存档 */
+function migrateV1(){
+  try{
+    const raw=localStorage.getItem(OLD_SAVE_KEY);
+    if(!raw) return false;
+    const v1=JSON.parse(raw);
+    const d=db();
+    if(Object.keys(d.slots).length){ localStorage.removeItem(OLD_SAVE_KEY); return false; }
+    const zones=v1.zones||{};
+    let count=0;
+    for(const k of Object.keys(zones)){
+      const zi=parseInt(k.slice(1),10);
+      if(!(zi>=0 && zi<ZONES.length)) continue;
+      const z=zones[k];
+      const id=genId();
+      d.slots[id]={
+        name:"旧档-"+ZONES[zi].name,
+        zoneIdx:zi,
+        customFleet: v1.customFleet||{2:2,3:2,4:1,5:1},
+        customN: v1.customN||10,
+        strict: v1.strict!==false,
+        n:z.n, grid:z.grid, sunkSizes:z.sunkSizes||[], savedAt:v1.savedAt||Date.now()
+      };
+      count++;
+    }
+    if(!count){ localStorage.removeItem(OLD_SAVE_KEY); return false; }
+    let active=Object.keys(d.slots)[0];
+    for(const id of Object.keys(d.slots)) if(d.slots[id].zoneIdx===v1.zoneIdx){ active=id; break; }
+    d.activeId=active;
+    persist(d);
+    localStorage.removeItem(OLD_SAVE_KEY);
+    return count;
+  }catch(e){ return false; }
+}
+
+/* 存档控件事件 */
+document.getElementById("slotSel").addEventListener("change", e=>switchSlot(e.target.value));
+document.getElementById("newSlotBtn").addEventListener("click", newSlotFlow);
+document.getElementById("renameSlotBtn").addEventListener("click", renameSlotFlow);
+document.getElementById("delSlotBtn").addEventListener("click", deleteSlotFlow);
 
 /* ================= 预计算布置方案 ================= */
 const PL = {};   // PL[n][size] = [{cells:Int32Array, nb:Int32Array}]
@@ -376,7 +508,7 @@ function compute(){
   }
   renderBoard();
   renderResults();
-  saveAll();
+  saveActive();
 }
 
 /* ================= 渲染 ================= */
@@ -584,9 +716,10 @@ document.addEventListener("keydown", e=>{
   if((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==="z"){ e.preventDefault(); undo(); }
 });
 document.getElementById("clearBtn").addEventListener("click", ()=>{
-  if(grid.some(v=>v!==0) && !confirm("确定清空当前海域的所有标记？（该海域的存档也会一并清除）")) return;
-  clearZoneSave();
-  resetBoard();
+  if(grid.some(v=>v!==0) && !confirm("确定清空当前存档「"+slotName(activeSlotId)+"」的所有标记？")) return;
+  grid=new Array(n*n).fill(0); sunkSizes=[]; undoStack=[];
+  exitSunkMode(); probs=null; validSamples=0; recoIdx=-1;
+  buildBoard(); compute();
 });
 document.getElementById("strictChk").addEventListener("change", compute);
 
@@ -596,13 +729,15 @@ ZONES.forEach((z,i)=>{
   const o=document.createElement("option"); o.value=i; o.textContent=z.name; zoneSel.appendChild(o);
 });
 zoneSel.addEventListener("change", ()=>{
+  if(grid.some(v=>v!==0) && !confirm("切换海域将清空当前存档「"+slotName(activeSlotId)+"」的标记，继续？")){ zoneSel.value=zoneIdx; return; }
   zoneIdx=+zoneSel.value;
   const z=ZONES[zoneIdx];
   document.getElementById("customBox").classList.toggle("on", !!z.custom);
   if(z.custom){ n=+document.getElementById("customN").value; }
   else { n=z.n; }
+  grid=new Array(n*n).fill(0); sunkSizes=[]; undoStack=[];
+  exitSunkMode(); probs=null; validSamples=0; recoIdx=-1;
   buildBoard();
-  restoreZoneState();   // 切换海域时恢复该海域自己的进度
   compute();
 });
 
@@ -612,8 +747,8 @@ for(let s=3;s<=10;s++){ const o=document.createElement("option"); o.value=s; o.t
 customN.value=10;
 customN.addEventListener("change", ()=>{
   if(!ZONES[zoneIdx].custom) return;
+  if(grid.some(v=>v!==0) && !confirm("修改地图尺寸将清空当前存档的标记，继续？")){ customN.value=n; return; }
   n=+customN.value;
-  clearZoneSave();   // 尺寸变了，旧标记作废
   grid=new Array(n*n).fill(0); sunkSizes=[]; undoStack=[];
   exitSunkMode(); probs=null; validSamples=0; recoIdx=-1;
   buildBoard(); compute();
@@ -638,25 +773,24 @@ function buildCustomFleet(){
 }
 buildCustomFleet();
 
-/* ================= 启动（自动恢复上次进度） ================= */
-(function initFromSave(){
-  const s=loadSave();
-  if(Number.isInteger(s.zoneIdx) && s.zoneIdx>=0 && s.zoneIdx<ZONES.length) zoneIdx=s.zoneIdx;
-  if(s.customFleet && typeof s.customFleet==="object") customFleet=s.customFleet;
-  zoneSel.value=zoneIdx;
-  const z=ZONES[zoneIdx];
-  document.getElementById("customBox").classList.toggle("on", !!z.custom);
-  if(z.custom){
-    const cn=(Number.isInteger(s.customN)&&s.customN>=3&&s.customN<=10)?s.customN:10;
-    document.getElementById("customN").value=cn;
-    n=cn;
-    buildCustomFleet();   // 刷新自定义舰队显示
+/* ================= 启动（恢复上次存档 / 迁移旧档） ================= */
+const migratedCount = migrateV1();
+(function init(){
+  const d=db();
+  const ids=Object.keys(d.slots);
+  if(ids.length){
+    if(d.activeId && d.slots[d.activeId]){
+      activeSlotId=d.activeId;
+    } else {
+      ids.sort((a,b)=>(d.slots[b].savedAt||0)-(d.slots[a].savedAt||0));
+      activeSlotId=ids[0]; d.activeId=activeSlotId; persist(d);
+    }
+    applySlot(d.slots[activeSlotId]);
   } else {
-    n=z.n;
+    createSlot("默认存档");
   }
+  if(migratedCount) setTimeout(()=>saveNoteMsg("📦 已自动迁移 "+migratedCount+" 个旧海域存档为命名存档，可在上方重命名"),0);
 })();
-buildBoard();
-restoreZoneState();
 compute();
 </script>
 </body>
