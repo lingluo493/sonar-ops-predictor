@@ -74,6 +74,15 @@
   details{font-size:12.5px;color:var(--sub);}
   details summary{cursor:pointer;font-weight:600;color:var(--ink);}
   details p{margin:6px 0;}
+  /* 内置对话框（替代 prompt/confirm，沙盒 iframe 内也可用） */
+  #modalMask{display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:50;align-items:center;justify-content:center;padding:20px;}
+  #modalMask.on{display:flex;}
+  #modalBox{background:#fff;border-radius:16px;box-shadow:0 10px 40px rgba(2,132,199,.25);padding:18px;max-width:380px;width:100%;}
+  #modalTitle{font-weight:700;font-size:15px;margin-bottom:10px;}
+  #modalMsg{font-size:13.5px;color:#334155;line-height:1.6;margin-bottom:4px;}
+  #modalInput{width:100%;padding:9px 12px;border-radius:10px;border:1px solid var(--line);font:inherit;margin-bottom:4px;}
+  #modalInput:focus{outline:none;border-color:var(--accent);}
+  .modalBtns{display:flex;gap:8px;justify-content:flex-end;margin-top:12px;}
 </style>
 </head>
 <body>
@@ -149,6 +158,19 @@
   </div>
 </main>
 
+<!-- 内置对话框 -->
+<div id="modalMask">
+  <div id="modalBox">
+    <div id="modalTitle"></div>
+    <div id="modalMsg" style="display:none"></div>
+    <input id="modalInput" type="text" autocomplete="off" enterkeyhint="done">
+    <div class="modalBtns">
+      <button id="modalCancel" class="ghost">取消</button>
+      <button id="modalOk" class="primary">确定</button>
+    </div>
+  </div>
+</div>
+
 <script>
 "use strict";
 /* ================= 海域数据（官方编成） ================= */
@@ -199,6 +221,44 @@ function persist(d){ try{ localStorage.setItem(SAVE_KEY, JSON.stringify(d)); }ca
 function saveNoteMsg(t){ const el=document.getElementById("saveNote"); if(el) el.textContent=t; }
 function genId(){ return "s"+Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
 function slotName(id){ const d=db(); const sl=d.slots[id]; return sl?sl.name:""; }
+
+/* 内置对话框：input 模式返回字符串(或 null 取消)；confirm 模式返回 true/false */
+function uiDialog(opts){
+  return new Promise(resolve=>{
+    const mask=document.getElementById("modalMask");
+    const inp=document.getElementById("modalInput");
+    const msg=document.getElementById("modalMsg");
+    const ok=document.getElementById("modalOk");
+    const cancel=document.getElementById("modalCancel");
+    document.getElementById("modalTitle").textContent=opts.title||"";
+    const inputMode = opts.input!==false;
+    inp.style.display = inputMode ? "block" : "none";
+    msg.style.display = opts.msg ? "block" : "none";
+    if(opts.msg) msg.textContent=opts.msg;
+    inp.value = opts.defaultValue||"";
+    mask.classList.add("on");
+    setTimeout(()=>{ (inputMode?inp:ok).focus(); }, 0);
+    let closed=false;
+    const done=(val)=>{
+      if(closed) return;
+      closed=true;
+      mask.classList.remove("on");
+      ok.removeEventListener("click", onOk);
+      cancel.removeEventListener("click", onCancel);
+      document.removeEventListener("keydown", onKey);
+      resolve(val);
+    };
+    const onOk=()=>done(inputMode ? inp.value.trim() : true);
+    const onCancel=()=>done(inputMode ? null : false);
+    const onKey=(e)=>{
+      if(e.key==="Escape"){ e.preventDefault(); onCancel(); }
+      else if(e.key==="Enter" && inputMode && document.activeElement===inp){ e.preventDefault(); onOk(); }
+    };
+    ok.addEventListener("click", onOk);
+    cancel.addEventListener("click", onCancel);
+    document.addEventListener("keydown", onKey);
+  });
+}
 
 function saveActive(){
   if(activeSlotId==null) return;
@@ -274,12 +334,12 @@ function switchSlot(id){
   saveNoteMsg("📂 已切换到「"+d.slots[id].name+"」");
 }
 
-function newSlotFlow(){
+async function newSlotFlow(){
   const d=db();
   const defName = "存档"+(Object.keys(d.slots).length+1);
-  const name = prompt("给新存档起个名字（建议：账号-海域，如「大号-8号海域」）：", defName);
+  const name = await uiDialog({title:"🆕 新建存档", msg:"给新存档起个名字（建议：账号-海域，如「大号-8号海域」）：", defaultValue:defName});
   if(name===null) return;
-  createSlot(name.trim()||defName, {
+  createSlot(name||defName, {
     zoneIdx, n, grid:new Array(n*n).fill(0), sunkSizes:[],
     customFleet:JSON.parse(JSON.stringify(customFleet)),
     customN:+document.getElementById("customN").value,
@@ -290,20 +350,21 @@ function newSlotFlow(){
   saveNoteMsg("🆕 新存档「"+slotName(activeSlotId)+"」已创建");
 }
 
-function renameSlotFlow(){
+async function renameSlotFlow(){
   if(activeSlotId==null) return;
   const d=db(); const sl=d.slots[activeSlotId];
-  const name=prompt("重命名存档：", sl.name);
+  const name = await uiDialog({title:"✏️ 重命名存档", defaultValue:sl.name});
   if(name===null) return;
-  sl.name=name.trim()||sl.name; sl.savedAt=Date.now(); persist(d);
+  sl.name=name||sl.name; sl.savedAt=Date.now(); persist(d);
   renderSlots();
   saveNoteMsg("✏️ 已重命名为「"+sl.name+"」");
 }
 
-function deleteSlotFlow(){
+async function deleteSlotFlow(){
   if(activeSlotId==null) return;
   const d=db(); const sl=d.slots[activeSlotId];
-  if(!confirm("确定删除存档「"+sl.name+"」？该存档的所有标记将丢失。")) return;
+  const ok = await uiDialog({title:"🗑 删除存档", msg:"确定删除存档「"+sl.name+"」？该存档的所有标记将丢失。", input:false});
+  if(!ok) return;
   delete d.slots[activeSlotId];
   const rest=Object.keys(d.slots).sort((a,b)=>(d.slots[b].savedAt||0)-(d.slots[a].savedAt||0));
   if(rest.length){
@@ -675,7 +736,7 @@ function exitSunkMode(){
 document.getElementById("sunkBtn").addEventListener("click", ()=>{
   if(sunkMode){ exitSunkMode(); renderBoard(); return; }
   const hits = grid.filter(v=>v===2).length;
-  if(hits===0){ alert("请先标记至少一个「命中💥」格，再标记击沉。"); return; }
+  if(hits===0){ uiDialog({title:"⚓ 标记击沉", msg:"请先标记至少一个「命中💥」格，再标记击沉。"}); return; }
   sunkMode=true; picked.clear();
   document.getElementById("sunkBar").classList.add("on");
   document.getElementById("sunkBtn").textContent="✕ 退出击沉模式";
@@ -684,7 +745,7 @@ document.getElementById("sunkBtn").addEventListener("click", ()=>{
 });
 document.getElementById("sunkOk").addEventListener("click", ()=>{
   const idx=[...picked].sort((a,b)=>a-b);
-  if(idx.length<2){ alert("请至少选中 2 个相邻的命中格（一艘潜艇至少 2 格）。"); return; }
+  if(idx.length<2){ uiDialog({title:"⚓ 标记击沉", msg:"请至少选中 2 个相邻的命中格（一艘潜艇至少 2 格）。"}); return; }
   // 校验连成一条直线
   const rows=idx.map(i=>(i/n)|0), cols=idx.map(i=>i%n);
   const sameRow=rows.every(r=>r===rows[0]);
@@ -697,11 +758,11 @@ document.getElementById("sunkOk").addEventListener("click", ()=>{
     const rs=idx.map(i=>(i/n)|0).sort((a,b)=>a-b);
     contiguous = rs.every((r,k)=>r===rs[0]+k);
   }
-  if(!contiguous){ alert("选中的格子必须连成一条直线（横向或纵向）。请检查所选命中格。"); return; }
+  if(!contiguous){ uiDialog({title:"⚓ 标记击沉", msg:"选中的格子必须连成一条直线（横向或纵向）。请检查所选命中格。"}); return; }
   const size=idx.length;
   const f = (ZONES[zoneIdx].custom ? customFleet : ZONES[zoneIdx].fleet);
   const used = sunkSizes.filter(s=>s===size).length;
-  if(!(f[size] > used)){ alert(size+" 格潜艇在该海域编成中只有 "+(f[size]||0)+" 艘，且可能已全部击沉。请核对。"); return; }
+  if(!(f[size] > used)){ uiDialog({title:"⚓ 标记击沉", msg:size+" 格潜艇在该海域编成中只有 "+(f[size]||0)+" 艘，且可能已全部击沉。请核对。"}); return; }
   pushUndo();
   for(const i of idx) grid[i]=3;
   sunkSizes.push(size);
@@ -715,8 +776,8 @@ document.getElementById("undoBtn").addEventListener("click", undo);
 document.addEventListener("keydown", e=>{
   if((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==="z"){ e.preventDefault(); undo(); }
 });
-document.getElementById("clearBtn").addEventListener("click", ()=>{
-  if(grid.some(v=>v!==0) && !confirm("确定清空当前存档「"+slotName(activeSlotId)+"」的所有标记？")) return;
+document.getElementById("clearBtn").addEventListener("click", async ()=>{
+  if(grid.some(v=>v!==0) && !(await uiDialog({title:"🧹 清空标记", msg:"确定清空当前存档「"+slotName(activeSlotId)+"」的所有标记？", input:false}))) return;
   grid=new Array(n*n).fill(0); sunkSizes=[]; undoStack=[];
   exitSunkMode(); probs=null; validSamples=0; recoIdx=-1;
   buildBoard(); compute();
@@ -728,8 +789,8 @@ const zoneSel=document.getElementById("zoneSel");
 ZONES.forEach((z,i)=>{
   const o=document.createElement("option"); o.value=i; o.textContent=z.name; zoneSel.appendChild(o);
 });
-zoneSel.addEventListener("change", ()=>{
-  if(grid.some(v=>v!==0) && !confirm("切换海域将清空当前存档「"+slotName(activeSlotId)+"」的标记，继续？")){ zoneSel.value=zoneIdx; return; }
+zoneSel.addEventListener("change", async ()=>{
+  if(grid.some(v=>v!==0) && !(await uiDialog({title:"🌊 切换海域", msg:"切换海域将清空当前存档「"+slotName(activeSlotId)+"」的标记，继续？", input:false}))){ zoneSel.value=zoneIdx; return; }
   zoneIdx=+zoneSel.value;
   const z=ZONES[zoneIdx];
   document.getElementById("customBox").classList.toggle("on", !!z.custom);
@@ -745,9 +806,9 @@ zoneSel.addEventListener("change", ()=>{
 const customN=document.getElementById("customN");
 for(let s=3;s<=10;s++){ const o=document.createElement("option"); o.value=s; o.textContent=s+" × "+s; customN.appendChild(o); }
 customN.value=10;
-customN.addEventListener("change", ()=>{
+customN.addEventListener("change", async ()=>{
   if(!ZONES[zoneIdx].custom) return;
-  if(grid.some(v=>v!==0) && !confirm("修改地图尺寸将清空当前存档的标记，继续？")){ customN.value=n; return; }
+  if(grid.some(v=>v!==0) && !(await uiDialog({title:"📐 修改尺寸", msg:"修改地图尺寸将清空当前存档的标记，继续？", input:false}))){ customN.value=n; return; }
   n=+customN.value;
   grid=new Array(n*n).fill(0); sunkSizes=[]; undoStack=[];
   exitSunkMode(); probs=null; validSamples=0; recoIdx=-1;
