@@ -50,6 +50,7 @@
   .cell.picked{outline:3px solid #7c3aed;outline-offset:1px;}
   .cell.reco{outline:3px solid var(--good);outline-offset:1px;}
   .cell.reco::after{content:"★";position:absolute;top:-2px;right:1px;font-size:11px;color:var(--good);}
+  .cell.scan{border:2px dashed #0ea5e9;background:#f0f9ff;color:#0369a1;font-size:10px;}
   .legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;font-size:12px;color:var(--sub);}
   .legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-1px;}
 
@@ -110,6 +111,7 @@
       <span><i style="background:#ef4444"></i>命中 💥</span>
       <span><i style="background:#1e3a5f"></i>已击沉 ⚓</span>
       <span><i style="background:#fff;outline:2px solid #16a34a"></i>推荐目标 ★</span>
+      <span><i style="background:#f0f9ff;outline:2px dashed #0ea5e9"></i>开局扫描顺序（数字）</span>
     </div>
     <div style="margin-top:8px;font-size:12px;color:#64748b">左键点击格子循环切换：<b>未知 → 落空 → 命中 → 未知</b></div>
     <div id="saveNote" style="margin-top:4px;font-size:12px;color:#16a34a;min-height:16px"></div>
@@ -135,6 +137,7 @@
       </div>
       <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <button id="sunkBtn" class="primary">⚓ 标记击沉</button>
+        <button id="sweepBtn" class="ghost" style="display:none" title="精确枚举证明这些未知格没有潜艇，一键标为落空">🧽 排除必空格</button>
         <label style="font-size:12.5px;color:var(--sub)"><input type="checkbox" id="strictChk" checked> 潜艇之间对角也算相邻（严格模式）</label>
       </div>
       <div id="sunkBar">
@@ -150,7 +153,7 @@
       <details style="margin-top:8px">
         <summary>📖 使用说明 & 深水炸弹经济学</summary>
         <p>1. 在上方选择当前海域（每个海域潜艇编成固定，来自官方数据）。<b>多个账号请点「＋ 存档」为每个账号建一个命名存档</b>（如「大号-8号海域」「小号-8号海域」），互不覆盖；可用下拉框随时切换，✏️ 重命名、🗑 删除。</p>
-        <p>2. 每扔一颗深水炸弹，就把结果标在图上：<b>落空 ✕ / 命中 💥</b>。程序会用蒙特卡洛模拟上万种合法布局，算出每格含潜艇的概率。</p>
+        <p>2. 每扔一颗深水炸弹，就把结果标在图上：<b>落空 ✕ / 命中 💥</b>。开局棋盘上的<b>蓝色虚线编号</b>就是最优扫描顺序（按最短艇长跳格），照编号打保证短艇必中。</p>
         <p>3. 潜艇的所有格子都被命中后，若该段长度已是剩余潜艇的最大长度，程序会<b>自动判定击沉</b>（移出剩余编成、标 ⚓、周围一圈排除）；若仍有更长的潜艇可能延伸到这段，游戏提示击沉后点「⚓ 标记击沉」，依次点击它的所有格子再确认即可。</p>
         <p>4. 炸弹来源：每天前 5 次进攻分基地/雇佣兵基地每次 3 发，之后每次 1 发（每日战斗上限 10 次）；看广告每天可领 2 发。</p>
         <p>5. 集束炸弹（6 号海域解锁）必中至少 1 发，建议留给剩余潜艇少、格子大的残局。</p>
@@ -751,16 +754,63 @@ function compute(){
     exactMode = usedExact;
   }
 
-  // 推荐目标
-  recoIdx=-1; let best=-1;
-  for(let i=0;i<N2;i++){
-    if(grid[i]!==0) continue;
-    const p = validSamples>0 ? probs[i]/validSamples : 0;
-    if(p>best){best=p; recoIdx=i;}
+  // ===== 推荐目标 =====
+  // 1) 开局（全空）：按最短艇长做跳格扫描，保证以最少的炸弹覆盖所有短艇
+  const opening = grid.every(v=>v===0);
+  const scanInfo = opening ? scanTargets() : null;
+  recoIdx=-1;
+  if(scanInfo && scanInfo.list.length){
+    recoIdx = scanInfo.list[0];
+  } else {
+    // 2) 中后盘：概率优先，概率接近（≥97% 最大值）时改用「信息量」裁决——
+    //    优先能大致把候选布局分成两半的格子，一发不论中不中都能砍掉最多可能性
+    let best=0;
+    for(let i=0;i<N2;i++){
+      if(grid[i]!==0) continue;
+      const p = validSamples>0 ? probs[i]/validSamples : 0;
+      if(p>best) best=p;
+    }
+    let bestScore=-1e9;
+    for(let i=0;i<N2;i++){
+      if(grid[i]!==0) continue;
+      const p = validSamples>0 ? probs[i]/validSamples : 0;
+      if(best>0 && p < best*0.97) continue;
+      const score = p*20 + entropyBits(p);   // 概率主导，熵在并列时翻盘
+      if(score>bestScore){ bestScore=score; recoIdx=i; }
+    }
   }
+
+  // ===== 必空格提示（仅在精确枚举下可靠） =====
+  const sweepBtn=document.getElementById("sweepBtn");
+  let zeroCount=0;
+  if(exactMode && validSamples>0 && probs){
+    for(let i=0;i<N2;i++) if(grid[i]===0 && probs[i]===0) zeroCount++;
+  }
+  if(sweepBtn){
+    sweepBtn.style.display = zeroCount>0 ? "" : "none";
+    sweepBtn.textContent = "🧽 排除必空格 ("+zeroCount+")";
+  }
+
   renderBoard();
   renderResults();
   saveActive();
+}
+
+/* 伯努利熵：p 越接近 0.5 信息量越大（用于概率并列时的裁决） */
+function entropyBits(p){
+  if(p<=0 || p>=1) return 0;
+  return -(p*Math.log2(p) + (1-p)*Math.log2(1-p));
+}
+
+/* 开局扫描：最短艇长 m，打所有 (行+列) % m == 0 的格，任何 m 格连续艇必被命中 */
+function scanTargets(){
+  const fleet=currentFleet();
+  if(!fleet.length) return null;
+  const m=Math.min(...fleet);
+  if(m<2) return null;
+  const list=[];
+  for(let r=0;r<n;r++) for(let c=0;c<n;c++) if((r+c)%m===0) list.push(r*n+c);
+  return {m, list};
 }
 
 /* ================= 渲染 ================= */
@@ -805,17 +855,27 @@ function renderBoard(){
   if(probs && validSamples>0){
     for(let i=0;i<n*n;i++) if(grid[i]===0) maxP=Math.max(maxP, probs[i]/validSamples);
   }
+  // 开局：显示跳格扫描编号（数字即建议轰炸顺序）
+  const opening = grid.every(v=>v===0);
+  const scan = opening ? scanTargets() : null;
+  const scanNo = new Map();
+  if(scan) scan.list.forEach((idx,k)=>scanNo.set(idx, k+1));
   cells.forEach(cell=>{
     const i=+cell.dataset.i;
     const st=grid[i];
-    cell.classList.remove("miss","hit","sunk","reco","picked");
+    cell.classList.remove("miss","hit","sunk","reco","picked","scan");
     cell.style.background="";
     cell.style.color="";
     if(st===1){cell.classList.add("miss");cell.textContent="✕";}
     else if(st===2){cell.classList.add("hit");cell.textContent="💥";}
     else if(st===3){cell.classList.add("sunk");cell.textContent="⚓";}
     else{
-      if(probs && validSamples>0 && maxP>0){
+      if(scanNo.has(i)){
+        cell.classList.add("scan");
+        cell.textContent=scanNo.get(i);
+      } else if(scan){
+        cell.textContent="";        // 开局时非扫描格留空，突出扫描顺序
+      } else if(probs && validSamples>0 && maxP>0){
         const p=probs[i]/validSamples;
         cell.style.background=probColor(maxP>0?p/maxP:0);
         cell.textContent=fmtPct(p);
@@ -849,12 +909,27 @@ function renderResults(){
   const recoEl=document.getElementById("reco");
   const list=document.getElementById("topList");
   list.innerHTML="";
-  if(recoIdx>=0 && probs && validSamples>0){
+  const scanInfo = (grid.every(v=>v===0)) ? scanTargets() : null;
+  if(scanInfo && scanInfo.list.length){
+    recoEl.textContent = "开局扫描：先打 "+coordName(scanInfo.list[0])+"（共 "+scanInfo.list.length+" 个扫描点，按棋盘编号 1→2→3 打）";
+    for(let k=0;k<Math.min(5,scanInfo.list.length);k++){
+      const li=document.createElement("li");
+      li.textContent = (k+1)+". "+coordName(scanInfo.list[k]);
+      list.appendChild(li);
+    }
+  } else if(recoIdx>=0 && probs && validSamples>0){
     const p=probs[recoIdx]/validSamples;
     recoEl.textContent = "建议轰炸 "+coordName(recoIdx)+"（概率 "+fmtPct(p)+"）";
+    // Top5 用与推荐一致的评分（概率 + 并列时的信息量）排序
     const arr=[];
-    for(let i=0;i<n*n;i++) if(grid[i]===0) arr.push([i,probs[i]/validSamples]);
-    arr.sort((a,b)=>b[1]-a[1]);
+    let best=0;
+    for(let i=0;i<n*n;i++) if(grid[i]===0) best=Math.max(best, probs[i]/validSamples);
+    for(let i=0;i<n*n;i++){
+      if(grid[i]!==0) continue;
+      const pr=probs[i]/validSamples;
+      arr.push([i, pr, pr*20+entropyBits(pr)]);
+    }
+    arr.sort((a,b)=>b[2]-a[2]);
     for(let k=0;k<Math.min(5,arr.length);k++){
       const li=document.createElement("li");
       li.textContent = coordName(arr[k][0])+" — "+fmtPct(arr[k][1]);
@@ -879,14 +954,16 @@ function renderTips(){
   const tips=document.getElementById("tips");
   let html="";
   if(hitCount>0){
-    html += "<b>🎯 有命中未击沉：</b>优先轰炸命中格<b>上下左右</b>的格子，先确定艇身方向，再沿方向延伸。程序的热力图已自动把概率集中到这些区域。";
+    html += "<b>🎯 追击模式：</b>别重新铺网，优先打命中格<b>同一直线两端</b>的下一格——命中说明艇身就在这条线上，沿轴线延伸最省弹。";
     html += "<br><b>🤖 自动识别击沉：</b>当某段连续命中格的长度已达<b>剩余潜艇的最大长度</b>，程序会自动判定为击沉 ⚓ 并移出剩余编成；若还有更长的潜艇可能延伸到这段，游戏提示击沉后请用「⚓ 标记击沉」选中它的所有命中格手动确认。";
   } else if(currentFleet().length>0){
     const minLen = Math.min(...currentFleet());
-    html += "<b>🔍 开局扫描：</b>所有潜艇长度 ≥ "+minLen+" 格，可按<b>每隔 "+minLen+" 格</b>的跳格模式轰炸（先打同行同列的间隔格），首中效率最高。";
+    html += "<b>🔍 开局跳格扫描：</b>最短艇长 "+minLen+" 格，棋盘上带<b>蓝色虚线编号</b>的格子就是建议顺序，按 1→2→3 打即可保证"+(minLen===2?"所有 2 格艇必被命中":"所有 "+minLen+" 格艇必被命中")+"。比随手打能省三成以上炸弹。";
   }
   html += "<br><b>⚓ 击沉后：</b>潜艇周围一圈（含对角）必然无艇，程序已自动排除这些格。";
-  html += "<br><b>💣 省弹秘诀：</b>概率每 1% 的差距在残局都很宝贵；当多个格概率并列时，优先选能同时覆盖多艘候选艇方向的格。";
+  html += "<br><b>🧽 必空格：</b>残局出现「排除必空格」按钮时，说明程序已证明那些格绝对没有潜艇——一键标掉，一枚炸弹都不浪费。";
+  html += "<br><b>💥 集束炸弹留给残局：</b>剩余潜艇少、格数多时，集束炸弹一发覆盖 6 格，实际命中率经常是单发的 2~3 倍。";
+  html += "<br><b>💣 概率并列：</b>热力图中概率接近的格，程序会优先选<b>「炸完能排除最多可能」</b>的那一个，中不中都能大幅缩小范围。";
   tips.innerHTML=html;
 }
 
@@ -974,6 +1051,18 @@ document.getElementById("sunkOk").addEventListener("click", ()=>{
   scheduleCompute();
 });
 document.getElementById("sunkCancel").addEventListener("click", ()=>{ exitSunkMode(); renderBoard(); });
+
+/* 排除必空格：精确枚举下概率为 0 的未知格，必然没有潜艇 */
+document.getElementById("sweepBtn").addEventListener("click", ()=>{
+  if(!(probs && exactMode && validSamples>0)) return;
+  const zeros=[];
+  for(let i=0;i<n*n;i++) if(grid[i]===0 && probs[i]===0) zeros.push(i);
+  if(!zeros.length) return;
+  pushUndo();
+  for(const i of zeros) grid[i]=1;
+  compute();
+  saveNoteMsg("🧽 已排除 "+zeros.length+" 个必空格（精确证明无潜艇）");
+});
 
 /* 撤销 / 清空 */
 document.getElementById("undoBtn").addEventListener("click", undo);
