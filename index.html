@@ -209,6 +209,7 @@ let customFleet = {2:2,3:2,4:1,5:1};
 let sunkMode = false;
 let picked = new Set();
 let computeTimer = null;
+let exactMode = false;    // true=精确枚举结果，100% 可信；false=蒙特卡洛估计
 
 /* ================= 本地存档（命名存档槽，可多账号并存） ================= */
 const SAVE_KEY = "sonarPredictorSave_v2";
@@ -463,55 +464,179 @@ function buildGeometry(n2, strict){
   return key;
 }
 
-/* ================= 蒙特卡洛采样 ================= */
+/* ================= 蒙特卡洛采样（强制覆盖命中格，偏差远小于加权法） ================= */
 function sampleBoards(n2, fleetArr, forbidden, hitIdx, samples, strict){
   const key = buildGeometry(n2, strict);
   const N2 = n2*n2;
   const hitGrid = new Uint8Array(N2);
   for(const i of hitIdx) hitGrid[i]=1;
-  const covered = new Uint8Array(N2);
   const occupied = new Uint8Array(N2);
   const counts = new Float64Array(N2);
+  const H = hitIdx.length;
   let valid=0, tries=0;
   const maxTries = samples*10;
   const order = fleetArr.slice();
 
   while(valid<samples && tries<maxTries){
     tries++;
-    occupied.fill(0); covered.fill(0);
+    occupied.fill(0);
     for(let i=order.length-1;i>0;i--){const j=(Math.random()*(i+1))|0; const t=order[i];order[i]=order[j];order[j]=t;}
+    let uncovered = H;
     let ok=true;
     for(const size of order){
       const list = PL[key][size];
-      const cand=[]; const w=[]; let tw=0;
+      const force = uncovered>0;
+      const cand=[];
       for(const pl of list){
-        let good=true, cov=0;
         const cells=pl.cells;
+        let good=true, cov=0;
         for(let k=0;k<cells.length;k++){
           const i=cells[k];
           if(forbidden[i]||occupied[i]){good=false;break;}
-          if(hitGrid[i]&&!covered[i])cov++;
+          if(hitGrid[i]) cov++;
         }
-        if(good){
-          const nb=pl.nb;
-          for(let k=0;k<nb.length;k++){ if(occupied[nb[k]]){good=false;break;} }
-        }
-        if(good){ cand.push(pl); if(cov>0){w.push(15);}else{w.push(1);} tw += (cov>0?15:1); }
+        if(!good) continue;
+        const nb=pl.nb;
+        for(let k=0;k<nb.length;k++){ if(occupied[nb[k]]){good=false;break;} }
+        if(!good) continue;
+        if(force && cov===0) continue;   // 还有未覆盖的命中格时，只允许选能覆盖它的落点
+        cand.push(pl);
       }
       if(cand.length===0){ok=false;break;}
-      let x=Math.random()*tw, pick=cand[0];
-      for(let i2=0;i2<cand.length;i2++){ x-=w[i2]; if(x<=0){pick=cand[i2];break;} }
+      const pick=cand[(Math.random()*cand.length)|0];
       const pc=pick.cells;
-      for(let k=0;k<pc.length;k++){ const i=pc[k]; occupied[i]=1; if(hitGrid[i])covered[i]=1; }
+      for(let k=0;k<pc.length;k++){ const i=pc[k]; occupied[i]=1; if(hitGrid[i]) uncovered--; }
     }
-    if(!ok) continue;
-    let allCov=true;
-    for(const i of hitIdx){ if(!covered[i]){allCov=false;break;} }
-    if(!allCov) continue;
+    if(!ok || uncovered>0) continue;
     valid++;
     for(let i=0;i<N2;i++) if(occupied[i]) counts[i]+=1;
   }
   return {counts, valid, tries};
+}
+
+/* ================= 精确枚举（残局小舰队用，结果 100% 可信） ================= */
+function exactProbabilities(n2, fleetArr, forbidden, hitIdx, strict){
+  try{
+    const key = buildGeometry(n2, strict);
+    const N2 = n2*n2;
+    const occ = new Uint8Array(N2);           // 0=空 1=被潜艇占 2=禁布/封锁
+    for(let i=0;i<N2;i++) if(forbidden[i]) occ[i]=2;
+    const H = hitIdx.length;
+    const sizes = fleetArr.slice().sort((a,b)=>b-a);
+    const K = sizes.length;
+
+    const PLIST = {}, PHITS = {};
+    for(const s of sizes){
+      if(PLIST[s]) continue;
+      PLIST[s] = PL[key][s];
+      PHITS[s] = PLIST[s].map(pl=>{
+        const arr=[];
+        for(let hi=0;hi<H;hi++){
+          const h=hitIdx[hi];
+          for(let k=0;k<pl.cells.length;k++){ if(pl.cells[k]===h){arr.push(hi);break;} }
+        }
+        return Int32Array.from(arr);
+      });
+    }
+    // 每个命中格可由哪些（尺寸,落点）覆盖
+    const hitPlacements = [];
+    for(let hi=0;hi<H;hi++){
+      const out=[];
+      for(const s in PLIST){
+        const list=PLIST[s], ph=PHITS[s];
+        for(let idx=0; idx<list.length; idx++){
+          let has=false;
+          for(let k=0;k<ph[idx].length;k++){ if(ph[idx][k]===hi){has=true;break;} }
+          if(has) out.push([+s, idx]);
+        }
+      }
+      hitPlacements.push(out);
+    }
+    // 后缀剩余尺寸计数（用于剪枝）
+    const suffix=[];
+    for(let d=0; d<=K; d++){
+      const m={};
+      for(let k=d;k<K;k++) m[sizes[k]]=(m[sizes[k]]||0)+1;
+      suffix.push(m);
+    }
+    // 可行性快速估算：根节点合法落点组合上限，超过预算直接放弃
+    let estimate=1;
+    const groupCnt={};
+    for(const s of sizes) groupCnt[s]=(groupCnt[s]||0)+1;
+    const rootCnt={};
+    for(const s in PLIST){
+      let c=0;
+      for(const pl of PLIST[s]){
+        let v=true;
+        for(let k=0;k<pl.cells.length;k++){ if(occ[pl.cells[k]]){v=false;break;} }
+        if(v) c++;
+      }
+      rootCnt[s]=c;
+    }
+    for(const s in groupCnt){
+      const c=rootCnt[s], m=groupCnt[s];
+      for(let k=0;k<m;k++) estimate = estimate*(c-k)/(k+1);
+    }
+    if(estimate>2000000) return null;
+
+    const hitCovered = new Uint8Array(H);
+    let uncovered = H;
+    const counts = new Float64Array(N2);
+    let total = 0, nodes = 0;
+    const NODE_BUDGET = 200000;
+
+    function placementFree(s, idx){
+      const cells=PLIST[s][idx].cells;
+      for(let k=0;k<cells.length;k++){ if(occ[cells[k]]) return false; }
+      return true;
+    }
+    function feasible(depth){
+      for(let hi=0;hi<H;hi++){
+        if(hitCovered[hi]) continue;
+        let ok=false;
+        for(const [s, idx] of hitPlacements[hi]){
+          if(!suffix[depth][s]) continue;
+          if(placementFree(s, idx)){ ok=true; break; }
+        }
+        if(!ok) return false;
+      }
+      return true;
+    }
+    function dfs(depth, lastIdx){
+      if(++nodes > NODE_BUDGET) throw {budget:true};
+      if(uncovered>0 && !feasible(depth)) return;
+      if(depth===K){
+        if(uncovered>0) return;
+        total++;
+        for(let i=0;i<N2;i++) if(occ[i]===1) counts[i]+=1;
+        return;
+      }
+      const s=sizes[depth];
+      const list=PLIST[s];
+      const start = (depth>0 && sizes[depth-1]===s) ? lastIdx+1 : 0;
+      for(let idx=start; idx<list.length; idx++){
+        if(!placementFree(s, idx)) continue;
+        const pl=list[idx];
+        const cells=pl.cells;
+        const touched=[];
+        for(let k=0;k<cells.length;k++){ const c=cells[k]; occ[c]=1; touched.push(c); }
+        const nb=pl.nb;
+        for(let k=0;k<nb.length;k++){ const c=nb[k]; if(occ[c]===0){ occ[c]=2; touched.push(c); } }
+        const newly=[];
+        const ph=PHITS[s][idx];
+        for(let k=0;k<ph.length;k++){ const hi=ph[k]; if(!hitCovered[hi]){ hitCovered[hi]=1; uncovered--; newly.push(hi); } }
+        dfs(depth+1, idx);
+        for(const hi of newly){ hitCovered[hi]=0; uncovered++; }
+        for(const c of touched) occ[c]=0;
+      }
+    }
+    dfs(0, -1);
+    if(total===0) return null;   // 无解（与标记矛盾），交给调用方按 MC 结果提示
+    return {counts, total};
+  }catch(e){
+    if(e && e.budget) return null;
+    return null;
+  }
 }
 
 /* ================= 概率计算入口 ================= */
@@ -551,19 +676,30 @@ function compute(){
   if(fleet.length===0){
     probs = new Float64Array(N2);
     validSamples = 1;
+    exactMode = true;
     if(hitIdx.length>0){
       warnBox.textContent="⚠️ 潜艇已全部标记击沉，但图上还有「命中」格——请检查是否漏标了击沉。";
       warnBox.classList.add("show");
     }
   } else {
-    const totalSubs = fleet.reduce((a,b)=>a+b,0);
-    const samples = Math.max(4000, Math.min(12000, 12000 - n*200));
-    const r = sampleBoards(n, fleet, forbidden, hitIdx, samples, strict);
-    probs = r.counts; validSamples = r.valid;
-    if(r.valid < 300){
-      warnBox.textContent="⚠️ 找不到与当前标记一致的布局（模拟 "+r.tries+" 次仅 "+r.valid+" 次成功）。请检查标记：命中格数量是否超过剩余潜艇总长度？击沉标记是否正确？";
-      warnBox.classList.add("show");
+    let usedExact = false;
+    if(hitIdx.length>0 && fleet.length<=5){
+      const r = exactProbabilities(n, fleet, forbidden, hitIdx, strict);
+      if(r){ probs=r.counts; validSamples=r.total; usedExact=true; }
     }
+    if(!usedExact){
+      const samples = Math.max(4000, Math.min(12000, 12000 - n*200));
+      const r = sampleBoards(n, fleet, forbidden, hitIdx, samples, strict);
+      probs = r.counts; validSamples = r.valid;
+      if(r.valid===0){
+        warnBox.textContent="⚠️ 找不到与当前标记一致的布局（模拟 "+r.tries+" 次全部失败）。请检查标记：命中格数量是否超过剩余潜艇总长度？击沉标记是否正确？";
+        warnBox.classList.add("show");
+      } else if(r.valid < 300){
+        warnBox.textContent="⚠️ 与标记一致的布局极少（"+r.valid+" 种），当前概率为模拟估计值，仅供参考。请检查标记是否有误。";
+        warnBox.classList.add("show");
+      }
+    }
+    exactMode = usedExact;
   }
 
   // 推荐目标
@@ -579,6 +715,11 @@ function compute(){
 }
 
 /* ================= 渲染 ================= */
+function fmtPct(p){
+  let v = Math.round(p*100);
+  if(v>=100 && !exactMode) v = 99;   // 模拟估计值不显示 100%，避免误导
+  return v+"%";
+}
 function cellSize(){ return n<=5?52 : n<=7?47 : n<=8?44 : 40; }
 function buildBoard(){
   const board=document.getElementById("board");
@@ -628,7 +769,7 @@ function renderBoard(){
       if(probs && validSamples>0 && maxP>0){
         const p=probs[i]/validSamples;
         cell.style.background=probColor(maxP>0?p/maxP:0);
-        cell.textContent=Math.round(p*100)+"%";
+        cell.textContent=fmtPct(p);
       } else { cell.textContent=""; }
       if(i===recoIdx) cell.classList.add("reco");
       if(picked.has(i)) cell.classList.add("picked");
@@ -661,20 +802,26 @@ function renderResults(){
   list.innerHTML="";
   if(recoIdx>=0 && probs && validSamples>0){
     const p=probs[recoIdx]/validSamples;
-    recoEl.textContent = "建议轰炸 "+coordName(recoIdx)+"（概率 "+Math.round(p*100)+"%）";
+    recoEl.textContent = "建议轰炸 "+coordName(recoIdx)+"（概率 "+fmtPct(p)+"）";
     const arr=[];
     for(let i=0;i<n*n;i++) if(grid[i]===0) arr.push([i,probs[i]/validSamples]);
     arr.sort((a,b)=>b[1]-a[1]);
     for(let k=0;k<Math.min(5,arr.length);k++){
       const li=document.createElement("li");
-      li.textContent = coordName(arr[k][0])+" — "+Math.round(arr[k][1]*100)+"%";
+      li.textContent = coordName(arr[k][0])+" — "+fmtPct(arr[k][1]);
       list.appendChild(li);
     }
   } else {
     recoEl.textContent = fleetEmpty() ? "🎉 本海域潜艇已全部击沉！" : "—";
   }
   const stat=document.getElementById("calcStat");
-  stat.textContent = validSamples>0 ? "基于 "+validSamples+" 种合法布局模拟" : "";
+  if(validSamples>0){
+    stat.textContent = exactMode
+      ? "✔ 精确枚举 "+validSamples+" 种合法布局（结果可信）"
+      : "≈ 基于模拟 "+validSamples+" 种布局估计（仅供参考）";
+  } else {
+    stat.textContent = "";
+  }
   renderTips();
 }
 function fleetEmpty(){ return currentFleet().length===0 && sunkSizes.length>0; }
