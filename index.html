@@ -151,7 +151,7 @@
         <summary>📖 使用说明 & 深水炸弹经济学</summary>
         <p>1. 在上方选择当前海域（每个海域潜艇编成固定，来自官方数据）。<b>多个账号请点「＋ 存档」为每个账号建一个命名存档</b>（如「大号-8号海域」「小号-8号海域」），互不覆盖；可用下拉框随时切换，✏️ 重命名、🗑 删除。</p>
         <p>2. 每扔一颗深水炸弹，就把结果标在图上：<b>落空 ✕ / 命中 💥</b>。程序会用蒙特卡洛模拟上万种合法布局，算出每格含潜艇的概率。</p>
-        <p>3. 确认一艘潜艇被击沉后，点「⚓ 标记击沉」，依次点击它的所有格子再确认——程序会把这艘潜艇从编成中移除，并把周围一圈标记为安全区（潜艇间至少隔 1 格）。</p>
+        <p>3. 潜艇的所有格子都被命中后，若该段长度已是剩余潜艇的最大长度，程序会<b>自动判定击沉</b>（移出剩余编成、标 ⚓、周围一圈排除）；若仍有更长的潜艇可能延伸到这段，游戏提示击沉后点「⚓ 标记击沉」，依次点击它的所有格子再确认即可。</p>
         <p>4. 炸弹来源：每天前 5 次进攻分基地/雇佣兵基地每次 3 发，之后每次 1 发（每日战斗上限 10 次）；看广告每天可领 2 发。</p>
         <p>5. 集束炸弹（6 号海域解锁）必中至少 1 发，建议留给剩余潜艇少、格子大的残局。</p>
         <p>6. 每击沉 1 艘 +10 声呐币，清空海域再 +50。声呐币活动结束清零，记得花掉！</p>
@@ -666,7 +666,56 @@ function deriveInputs(){
   }
   return {forbidden, hitIdx, fleet:currentFleet(), strict};
 }
+/* ================= 自动识别完整击沉 =================
+   连续命中段必属同一艘潜艇（潜艇之间至少隔 1 格）。
+   当某段的长度 == 剩余潜艇的最大长度时，盖住它的潜艇只能是最大长度那一档，
+   且所有格子都被命中 → 必然完整击沉，自动移出剩余编成并标 ⚓。
+   若还存在更长的潜艇（可能延伸到这段），则无法自动判定，需手动「⚓ 标记击沉」。 */
+function findHitRuns(){
+  const runs=[];
+  for(let r=0;r<n;r++){
+    let c=0;
+    while(c<n){
+      if(grid[r*n+c]===2){
+        const start=c;
+        while(c<n&&grid[r*n+c]===2)c++;
+        if(c-start>=2){const cells=[];for(let k=start;k<c;k++)cells.push(r*n+k);runs.push(cells);}
+      } else c++;
+    }
+  }
+  for(let c=0;c<n;c++){
+    let r=0;
+    while(r<n){
+      if(grid[r*n+c]===2){
+        const start=r;
+        while(r<n&&grid[r*n+c]===2)r++;
+        if(r-start>=2){const cells=[];for(let k=start;k<r;k++)cells.push(k*n+c);runs.push(cells);}
+      } else r++;
+    }
+  }
+  return runs;
+}
+function autoDetectSunkOnce(){
+  const runs=findHitRuns();
+  if(!runs.length) return false;
+  const fleet=currentFleet();
+  if(!fleet.length) return false;
+  const maxRem=Math.max(...fleet);
+  const cand=runs.filter(cells=>cells.length===maxRem);
+  if(!cand.length) return false;
+  const avail=fleet.filter(s=>s===maxRem).length;
+  if(cand.length>avail) return false;   // 命中段比可用潜艇还多 = 标记矛盾，交给概率计算报警
+  for(const cells of cand){
+    for(const i of cells) grid[i]=3;
+    sunkSizes.push(maxRem);
+  }
+  return true;
+}
+
 function compute(){
+  // 自动识别击沉（循环以处理连环晋级：5格艇确认后，3格命中段随之成为最大长度）
+  let guard=0;
+  while(autoDetectSunkOnce() && ++guard<10){}
   const {forbidden, hitIdx, fleet, strict} = deriveInputs();
   const warnBox = document.getElementById("warnBox");
   warnBox.classList.remove("show");
@@ -831,6 +880,7 @@ function renderTips(){
   let html="";
   if(hitCount>0){
     html += "<b>🎯 有命中未击沉：</b>优先轰炸命中格<b>上下左右</b>的格子，先确定艇身方向，再沿方向延伸。程序的热力图已自动把概率集中到这些区域。";
+    html += "<br><b>🤖 自动识别击沉：</b>当某段连续命中格的长度已达<b>剩余潜艇的最大长度</b>，程序会自动判定为击沉 ⚓ 并移出剩余编成；若还有更长的潜艇可能延伸到这段，游戏提示击沉后请用「⚓ 标记击沉」选中它的所有命中格手动确认。";
   } else if(currentFleet().length>0){
     const minLen = Math.min(...currentFleet());
     html += "<b>🔍 开局扫描：</b>所有潜艇长度 ≥ "+minLen+" 格，可按<b>每隔 "+minLen+" 格</b>的跳格模式轰炸（先打同行同列的间隔格），首中效率最高。";
@@ -854,6 +904,7 @@ function onCellClick(i){
     }
     return;
   }
+  if(grid[i]===3) return;   // 已击沉格不可点击改动，如需回退请用「撤销」
   pushUndo();
   grid[i] = (grid[i]===0?1 : grid[i]===1?2 : 0);
   scheduleCompute();
